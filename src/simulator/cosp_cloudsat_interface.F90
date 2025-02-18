@@ -31,7 +31,8 @@
 ! %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 MODULE MOD_COSP_CLOUDSAT_INTERFACE
   USE COSP_KINDS,      ONLY: wp
-  USE quickbeam,       ONLY: quickbeam_init,radar_cfg,Re_MAX_BIN,Re_BIN_LENGTH
+  USE quickbeam,       ONLY: quickbeam_init,radar_cfg,Re_MAX_BIN,Re_BIN_LENGTH, &
+                             maxhclass, nRe_types, nd, mt_ntt
   IMPLICIT NONE
 
   ! Directory where LUTs will be stored
@@ -99,6 +100,17 @@ CONTAINS
          trim(cloudsat_micro_scheme)
 
     ! Initialize for NEW radar-configurarion derived type (radar_cfg)
+    allocate(rcfg%N_scale_flag(maxhclass,nRe_types))
+    allocate(rcfg%Z_scale_flag(maxhclass,mt_ntt,nRe_types))
+    allocate(rcfg%Z_scale_added_flag(maxhclass,mt_ntt,nRe_types))
+    allocate(rcfg%Ze_scaled(maxhclass,mt_ntt,nRe_types))
+    allocate(rcfg%Zr_scaled(maxhclass,mt_ntt,nRe_types))
+    allocate(rcfg%kr_scaled(maxhclass,mt_ntt,nRe_types))
+    allocate(rcfg%fc(maxhclass,nd,nRe_types))
+    allocate(rcfg%rho_eff(maxhclass,nd,nRe_types))
+    allocate(rcfg%base_list(Re_MAX_BIN))
+    allocate(rcfg%step_list(Re_MAX_BIN))
+
     rcfg%freq                = radar_freq
     rcfg%k2                  = k2
     rcfg%use_gas_abs         = use_gas_abs
@@ -118,7 +130,7 @@ CONTAINS
     ! Set up Re bin "structure" for z_scaling
     rcfg%base_list(1)=0
     do j=1,Re_MAX_BIN
-       rcfg%step_list(j)=0.1_wp+0.1_wp*((j-1)**1.5)
+       rcfg%step_list(j)=0.1_wp+0.1_wp*((j-1)**1.5_wp)
        if(rcfg%step_list(j)>Re_BIN_LENGTH) then
           rcfg%step_list(j)=Re_BIN_LENGTH
        endif

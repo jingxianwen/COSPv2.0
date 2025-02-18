@@ -54,6 +54,7 @@ module quickbeam
                                   pClass_Snow1, pClass_Snow2, pClass_Mixed1, pClass_Mixed2, &
                                   pClass_Rain4, pClass_default, Zenonbinval, Zbinvallnd,    &
                                   N_HYDRO,nCloudsatPrecipClass,cloudsat_preclvl
+
   USE MOD_COSP_STATS,       ONLY: COSP_LIDAR_ONLY_CLOUD,hist1D,COSP_CHANGE_VERTICAL_GRID
   implicit none
 
@@ -89,12 +90,11 @@ module quickbeam
      ! Variables used to store Z scale factors
      character(len=240)                             :: scale_LUT_file_name
      logical                                        :: load_scale_LUTs, update_scale_LUTs
-     logical, dimension(maxhclass,nRe_types)        :: N_scale_flag
-     logical, dimension(maxhclass,mt_ntt,nRe_types) :: Z_scale_flag,Z_scale_added_flag
-     real(wp),dimension(maxhclass,mt_ntt,nRe_types) :: Ze_scaled,Zr_scaled,kr_scaled
-     real(wp),dimension(maxhclass,nd,nRe_types)     :: fc, rho_eff
-     real(wp),dimension(Re_MAX_BIN)                 :: base_list,step_list
-
+     logical,  allocatable, dimension(:,:)   :: N_scale_flag
+     logical,  allocatable, dimension(:,:,:) :: Z_scale_flag, Z_scale_added_flag
+     real(wp), allocatable, dimension(:,:,:) :: Ze_scaled, Zr_scaled, kr_scaled
+     real(wp), allocatable, dimension(:,:,:) :: fc, rho_eff
+     real(wp), allocatable, dimension(:)     :: base_list, step_list
   end type radar_cfg
 
 contains
@@ -123,10 +123,8 @@ contains
     ! LOCAL VARIABLES
     integer :: k,pr,start_gate,end_gate,d_gate
     real(wp),dimension(nprof,ngate) :: &
-         Ze_ray,        & ! Rayleigh reflectivity (dBZ)
          g_to_vol,      & ! Gaseous atteunation, radar to vol (dB)
-         a_to_vol,      & ! Hydromets attenuation, radar to vol (dB) 
-         z_ray            ! Reflectivity factor, Rayleigh only (mm^6/m^3)
+         a_to_vol         ! Hydromets attenuation, radar to vol (dB) 
 
     ! Load scaling matricies from disk -- but only the first time this subroutine is called
     if(rcfg%load_scale_LUTs) then
@@ -205,17 +203,7 @@ contains
        enddo   ! End loop over pr (profile)
     enddo ! End loop of k (range gate)
     
-    ! Compute Rayleigh reflectivity, and full, attenuated reflectivity
-    if(rcfg%do_ray == 1) then
-       where(z_ray(1:nprof,1:ngate) > 0._wp)
-          Ze_ray(1:nprof,1:ngate) = 10._wp*log10(z_ray(1:nprof,1:ngate))
-       elsewhere
-          Ze_Ray(1:nprof,1:ngate) = 0._wp
-       endwhere
-    else 
-      Ze_ray(1:nprof,1:ngate) = R_UNDEF
-    end if
-
+    ! Compute full and attenuated reflectivity
     where(z_vol(1:nprof,1:ngate) > 0._wp) 
       Ze_non(1:nprof,1:ngate) = 10._wp*log10(z_vol(1:nprof,1:ngate))
       dBZe(1:nprof,1:ngate) = Ze_non(1:nprof,1:ngate)-a_to_vol(1:nprof,1:ngate)-g_to_vol(1:nprof,1:ngate)
@@ -232,7 +220,7 @@ contains
   ! SUBROUTINE quickbeam_column
   ! ######################################################################################
   subroutine quickbeam_column(npoints, ncolumns, nlevels, llm, DBZE_BINS, platform,      &
-       Ze_tot, Ze_tot_non, land, t2m, fracPrecipIce, zlev, zlev_half, cfad_ze,           &
+       Ze_tot, Ze_tot_non, land, surfelev, t2m, fracPrecipIce, zlev, zlev_half, cfad_ze, &
        cloudsat_precip_cover, cloudsat_pia)
     ! Inputs
     integer,intent(in) :: &
@@ -245,6 +233,7 @@ contains
          platform      ! Name of platform (e.g. cloudsat)
     real(wp),dimension(Npoints),intent(in) :: &
          land,               & ! Land/Sea mask. (1/0)
+         surfelev,           & ! Surface Elevation (m)
          t2m                   ! Near-surface temperature
     real(wp),dimension(Npoints,Ncolumns),intent(in) :: &
          fracPrecipIce         ! Fraction of precipitation which is frozen.     (1)
@@ -253,7 +242,7 @@ contains
          Ze_tot_non    ! Effective reflectivity factor w/o attenuation (dBZ)
     real(wp),intent(in),dimension(npoints,Nlevels) :: &
          zlev          ! Model full levels
-    real(wp),intent(in),dimension(npoints,Nlevels+1) :: &
+    real(wp),intent(in),dimension(npoints,Nlevels) :: &
          zlev_half     ! Model half levels
          
     ! Outputs
@@ -266,6 +255,7 @@ contains
     
     ! Local variables
     integer :: i,j
+    real(wp) :: zstep
     real(wp),dimension(npoints,ncolumns,llm) :: ze_toti,ze_noni
     logical :: lcloudsat = .false.
 
@@ -294,9 +284,11 @@ contains
           call cosp_change_vertical_grid(Npoints,Ncolumns,Nlevels,zlev(:,nlevels:1:-1),&
                zlev_half(:,nlevels:1:-1),Ze_tot_non(:,:,nlevels:1:-1),llm,vgrid_zl(llm:1:-1),&
                vgrid_zu(llm:1:-1),Ze_noni(:,:,llm:1:-1),log_units=.true.)
-          ! Not call routine to generate diagnostics.
+          ! Compute the zstep distance between two atmopsheric layers
+	  zstep = vgrid_zl(1)-vgrid_zl(2)
+          ! Now call routine to generate diagnostics.
           call cloudsat_precipOccurence(Npoints, Ncolumns, llm, N_HYDRO, Ze_toti, Ze_noni, &
-               land, t2m, fracPrecipIce, cloudsat_precip_cover, cloudsat_pia)
+               land, surfelev, t2m, fracPrecipIce, cloudsat_precip_cover, cloudsat_pia, zstep)
        else
           ! Effective reflectivity histogram
           do i=1,Npoints
@@ -345,7 +337,7 @@ contains
   !        parameter cloudsat_preclvl, defined in src/cosp_config.F90
   ! ######################################################################################
   subroutine cloudsat_precipOccurence(Npoints, Ncolumns, llm, Nhydro, Ze_out, Ze_non_out, &
-       land, t2m, fracPrecipIce,  cloudsat_precip_cover, cloudsat_pia)
+       land, surfelev, t2m, fracPrecipIce,  cloudsat_precip_cover, cloudsat_pia, zstep)
  
     ! Inputs
     integer,intent(in) :: &
@@ -355,24 +347,30 @@ contains
          llm                   ! Number of levels
     real(wp),dimension(Npoints),intent(in) :: &
          land,               & ! Land/Sea mask. (1/0)
+         surfelev,           & ! Surface Elevation (m)
          t2m                   ! Near-surface temperature
     real(wp),dimension(Npoints,Ncolumns,llm),intent(in) :: &
          Ze_out,             & ! Effective reflectivity factor                  (dBZ)
          Ze_non_out            ! Effective reflectivity factor, w/o attenuation (dBZ)
     real(wp),dimension(Npoints,Ncolumns),intent(in) :: &
          fracPrecipIce         ! Fraction of precipitation which is frozen.     (1)
+    real(wp),intent(in) :: &
+         zstep                 ! Distance between two atmopsheric layers (m)
 
     ! Outputs 
     real(wp),dimension(Npoints,nCloudsatPrecipClass),intent(out) :: &
          cloudsat_precip_cover ! Model precip rate in by CloudSat precip flag
     real(wp),dimension(Npoints),intent(out) :: &
-         cloudsat_pia          ! Cloudsat path integrated attenuation
-    
+         cloudsat_pia          ! Cloudsat path integrated attenuation			        
+
     ! Local variables 
     integer,dimension(Npoints,Ncolumns) :: &
          cloudsat_pflag,      & ! Subcolumn precipitation flag
          cloudsat_precip_pia    ! Subcolumn path integrated attenutation.
-    integer :: pr,i,k,m,j
+    integer,dimension(Npoints) :: &
+         cloudsat_preclvl_index ! Altitude index for precip flags calculation
+                                ! in 40-level grid (one layer above surfelev) 
+    integer :: pr,i,k
     real(wp) :: Zmax
     
     ! Initialize 
@@ -380,57 +378,62 @@ contains
     cloudsat_precip_pia(:,:)   = 0._wp
     cloudsat_precip_cover(:,:) = 0._wp
     cloudsat_pia(:)            = 0._wp
+    cloudsat_preclvl_index(:)  = 0._wp
+
+    ! Computing altitude index for precip flags calculation
+    cloudsat_preclvl_index(:) = cloudsat_preclvl - floor( surfelev(:)/zstep )
 
     ! ######################################################################################
     ! SUBCOLUMN processing
     ! ######################################################################################
     do i=1, Npoints
        do pr=1,Ncolumns
-          ! 1) Compute the PIA in all profiles containing hydrometeors
-          if ( (Ze_non_out(i,pr,cloudsat_preclvl).gt.-100) .and. (Ze_out(i,pr,cloudsat_preclvl).gt.-100) ) then
-             if ( (Ze_non_out(i,pr,cloudsat_preclvl).lt.100) .and. (Ze_out(i,pr,cloudsat_preclvl).lt.100) ) then
-                cloudsat_precip_pia(i,pr) = Ze_non_out(i,pr,cloudsat_preclvl) - Ze_out(i,pr,cloudsat_preclvl)
-             endif
-          endif
-          
-          ! 2) Compute precipitation flag
+          ! Compute precipitation flag
           ! ################################################################################
-          ! 2a) Oceanic points.
+          ! 1) Oceanic points.
           ! ################################################################################
           if (land(i) .eq. 0) then
+
+             ! 1a) Compute the PIA in all profiles containing hydrometeors
+             if ( (Ze_non_out(i,pr,cloudsat_preclvl_index(i)).gt.-100) .and. (Ze_out(i,pr,cloudsat_preclvl_index(i)).gt.-100) ) then
+                if ( (Ze_non_out(i,pr,cloudsat_preclvl_index(i)).lt.100) .and. (Ze_out(i,pr,cloudsat_preclvl_index(i)).lt.100) ) then
+                   cloudsat_precip_pia(i,pr) = Ze_non_out(i,pr,cloudsat_preclvl_index(i)) - Ze_out(i,pr,cloudsat_preclvl_index(i))
+                endif
+             endif
+
              ! Snow
              if(fracPrecipIce(i,pr).gt.0.9) then
-                if(Ze_non_out(i,pr,cloudsat_preclvl).gt.Zenonbinval(2)) then
+                if(Ze_non_out(i,pr,cloudsat_preclvl_index(i)).gt.Zenonbinval(2)) then
                    cloudsat_pflag(i,pr) = pClass_Snow2                   ! TSL: Snow certain
                 endif
-                if(Ze_non_out(i,pr,cloudsat_preclvl).gt.Zenonbinval(4).and. &
-                     Ze_non_out(i,pr,cloudsat_preclvl).le.Zenonbinval(2)) then
+                if(Ze_non_out(i,pr,cloudsat_preclvl_index(i)).gt.Zenonbinval(4).and. &
+                     Ze_non_out(i,pr,cloudsat_preclvl_index(i)).le.Zenonbinval(2)) then
                    cloudsat_pflag(i,pr) = pClass_Snow1                   ! TSL: Snow possible
                 endif
              endif
              
              ! Mixed
              if(fracPrecipIce(i,pr).gt.0.1.and.fracPrecipIce(i,pr).le.0.9) then
-                if(Ze_non_out(i,pr,cloudsat_preclvl).gt.Zenonbinval(2)) then
+                if(Ze_non_out(i,pr,cloudsat_preclvl_index(i)).gt.Zenonbinval(2)) then
                    cloudsat_pflag(i,pr) = pClass_Mixed2                  ! TSL: Mixed certain
                 endif
-                if(Ze_non_out(i,pr,cloudsat_preclvl).gt.Zenonbinval(4).and. &
-                     Ze_non_out(i,pr,cloudsat_preclvl).le.Zenonbinval(2)) then
+                if(Ze_non_out(i,pr,cloudsat_preclvl_index(i)).gt.Zenonbinval(4).and. &
+                     Ze_non_out(i,pr,cloudsat_preclvl_index(i)).le.Zenonbinval(2)) then
                    cloudsat_pflag(i,pr) = pClass_Mixed1                  ! TSL: Mixed possible
                 endif
              endif
              
              ! Rain
              if(fracPrecipIce(i,pr).le.0.1) then
-                if(Ze_non_out(i,pr,cloudsat_preclvl).gt.Zenonbinval(1)) then
+                if(Ze_non_out(i,pr,cloudsat_preclvl_index(i)).gt.Zenonbinval(1)) then
                    cloudsat_pflag(i,pr) = pClass_Rain3                   ! TSL: Rain certain
                 endif
-                if(Ze_non_out(i,pr,cloudsat_preclvl).gt.Zenonbinval(3).and. &
-                     Ze_non_out(i,pr,cloudsat_preclvl).le.Zenonbinval(1)) then
+                if(Ze_non_out(i,pr,cloudsat_preclvl_index(i)).gt.Zenonbinval(3).and. &
+                     Ze_non_out(i,pr,cloudsat_preclvl_index(i)).le.Zenonbinval(1)) then
                    cloudsat_pflag(i,pr) = pClass_Rain2                   ! TSL: Rain probable
                 endif
-                if(Ze_non_out(i,pr,cloudsat_preclvl).gt.Zenonbinval(4).and. &
-                     Ze_non_out(i,pr,cloudsat_preclvl).le.Zenonbinval(3)) then
+                if(Ze_non_out(i,pr,cloudsat_preclvl_index(i)).gt.Zenonbinval(4).and. &
+                     Ze_non_out(i,pr,cloudsat_preclvl_index(i)).le.Zenonbinval(3)) then
                    cloudsat_pflag(i,pr) = pClass_Rain1                   ! TSL: Rain possible
                 endif
                 if(cloudsat_precip_pia(i,pr).gt.40) then
@@ -439,25 +442,34 @@ contains
              endif
              
              ! No precipitation
-             if(Ze_non_out(i,pr,cloudsat_preclvl).le.-15) then
+             if(Ze_non_out(i,pr,cloudsat_preclvl_index(i)).le.-15) then
                 cloudsat_pflag(i,pr) = pClass_noPrecip                   ! TSL: Not Raining
              endif
           endif ! Ocean points
           
           ! ################################################################################
-          ! 2b) Land points.
+          ! 2) Land points.
+	  !    *NOTE* For land points we go up a layer higher, so cloudsat_preclvl_index(i)-1
+	  !                  
           ! ################################################################################
-          if (land(i) .eq. 1) then
+          if (land(i) .eq. 1) then             
+	     ! 2a) Compute the PIA in all profiles containing hydrometeors
+             if ( (Ze_non_out(i,pr,cloudsat_preclvl_index(i)-1).gt.-100) .and. (Ze_out(i,pr,cloudsat_preclvl_index(i)-1).gt.-100) ) then
+                if ( (Ze_non_out(i,pr,cloudsat_preclvl_index(i)-1).lt.100) .and. (Ze_out(i,pr,cloudsat_preclvl_index(i)-1).lt.100) ) then
+                   cloudsat_precip_pia(i,pr) = Ze_non_out(i,pr,cloudsat_preclvl_index(i)-1) - Ze_out(i,pr,cloudsat_preclvl_index(i)-1)
+                endif
+             endif
+
              ! Find Zmax, the maximum reflectivity value in the attenuated profile (Ze_out);
              Zmax=maxval(Ze_out(i,pr,:))
 
              ! Snow (T<273)
              if(t2m(i) .lt. 273._wp) then
-                if(Ze_out(i,pr,cloudsat_preclvl) .gt. Zbinvallnd(5)) then
+                if(Ze_out(i,pr,cloudsat_preclvl_index(i)-1) .gt. Zbinvallnd(5)) then
                    cloudsat_pflag(i,pr) = pClass_Snow2                      ! JEK: Snow certain
                 endif
-                if(Ze_out(i,pr,cloudsat_preclvl) .gt. Zbinvallnd(6) .and. &
-                     Ze_out(i,pr,cloudsat_preclvl).le.Zbinvallnd(5)) then
+                if(Ze_out(i,pr,cloudsat_preclvl_index(i)-1) .gt. Zbinvallnd(6) .and. &
+                     Ze_out(i,pr,cloudsat_preclvl_index(i)-1).le.Zbinvallnd(5)) then
                    cloudsat_pflag(i,pr) = pClass_Snow1                      ! JEK: Snow possible
                 endif
              endif
@@ -465,11 +477,11 @@ contains
              ! Mized phase (273<T<275)
              if(t2m(i) .ge. 273._wp .and. t2m(i) .le. 275._wp) then
                 if ((Zmax .gt. Zbinvallnd(1) .and. cloudsat_precip_pia(i,pr).gt.30) .or. &
-                     (Ze_out(i,pr,cloudsat_preclvl) .gt. Zbinvallnd(4))) then
+                     (Ze_out(i,pr,cloudsat_preclvl_index(i)-1) .gt. Zbinvallnd(4))) then
                    cloudsat_pflag(i,pr) = pClass_Mixed2                     ! JEK: Mixed certain
                 endif
-                if ((Ze_out(i,pr,cloudsat_preclvl) .gt. Zbinvallnd(6)  .and. &
-                     Ze_out(i,pr,cloudsat_preclvl) .le. Zbinvallnd(4)) .and. &
+                if ((Ze_out(i,pr,cloudsat_preclvl_index(i)-1) .gt. Zbinvallnd(6)  .and. &
+                     Ze_out(i,pr,cloudsat_preclvl_index(i)-1) .le. Zbinvallnd(4)) .and. &
                      (Zmax .gt. Zbinvallnd(5)) ) then
                    cloudsat_pflag(i,pr) = pClass_Mixed1                     ! JEK: Mixed possible
                 endif
@@ -478,14 +490,14 @@ contains
              ! Rain (T>275)
              if(t2m(i) .gt. 275) then
                 if ((Zmax .gt. Zbinvallnd(1) .and. cloudsat_precip_pia(i,pr).gt.30) .or. &
-                     (Ze_out(i,pr,cloudsat_preclvl) .gt. Zbinvallnd(2))) then
+                     (Ze_out(i,pr,cloudsat_preclvl_index(i)-1) .gt. Zbinvallnd(2))) then
                    cloudsat_pflag(i,pr) = pClass_Rain3                      ! JEK: Rain certain
                 endif
-                if((Ze_out(i,pr,cloudsat_preclvl) .gt. Zbinvallnd(6)) .and. &
+                if((Ze_out(i,pr,cloudsat_preclvl_index(i)-1) .gt. Zbinvallnd(6)) .and. &
                      (Zmax .gt. Zbinvallnd(3))) then
                    cloudsat_pflag(i,pr) = pClass_Rain2                      ! JEK: Rain probable
                 endif
-                if((Ze_out(i,pr,cloudsat_preclvl) .gt. Zbinvallnd(6)) .and. &
+                if((Ze_out(i,pr,cloudsat_preclvl_index(i)-1) .gt. Zbinvallnd(6)) .and. &
                      (Zmax.lt.Zbinvallnd(3))) then
                    cloudsat_pflag(i,pr) = pClass_Rain1                      ! JEK: Rain possible
                 endif
@@ -495,7 +507,7 @@ contains
              endif
              
              ! No precipitation
-             if(Ze_out(i,pr,cloudsat_preclvl).le.-15) then
+             if(Ze_out(i,pr,cloudsat_preclvl_index(i)-1) .le. -15) then
                 cloudsat_pflag(i,pr) =  pClass_noPrecip                     ! JEK: Not Precipitating
              endif         
           endif ! Land points
@@ -514,7 +526,7 @@ contains
              cloudsat_precip_cover(i,k) = count(cloudsat_pflag(i,:) .eq. k-1)
           endif
        enddo
-
+ 
        ! Gridmean path integrated attenuation (pia)
        cloudsat_pia(i)=sum(cloudsat_precip_pia(i,:))
     enddo
